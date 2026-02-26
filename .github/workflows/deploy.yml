@@ -1,0 +1,112 @@
+name: Deploy Radiation Dashboard to Elastic Cloud
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'elasticsearch/**'
+      - 'workflows/**'
+      - 'kibana/**'
+      - 'agent/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      ES_URL: ${{ secrets.ELASTICSEARCH_URL }}
+      KB_URL: ${{ secrets.KIBANA_URL }}
+      API_KEY: ${{ secrets.DEPLOY_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 1. Elasticsearch: Index Template ───────────────
+      - name: Deploy Index Template
+        run: |
+          curl -sf -X PUT "${ES_URL}/_index_template/radiation-dashboard-template" \
+            -H "Authorization: ApiKey ${API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d @elasticsearch/index-template.json
+          echo "✅ Index template deployed"
+
+      # ── 2. Elasticsearch: Bootstrap Write Index ────────
+      - name: Bootstrap Write Index (idempotent)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: ApiKey ${API_KEY}" \
+            "${ES_URL}/radiation-dashboard")
+          if [ "$STATUS" = "404" ]; then
+            curl -sf -X PUT "${ES_URL}/radiation-dashboard-000001" \
+              -H "Authorization: ApiKey ${API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d @elasticsearch/bootstrap-index.json
+            echo "✅ Bootstrap index created"
+          else
+            echo "⏭️  Alias already exists, skipping"
+          fi
+
+      # ── 3. Agent Builder: Deploy Agent via API ─────────
+      - name: Deploy Radiation Environment Expert Agent
+        run: |
+          AGENT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: ApiKey ${API_KEY}" \
+            -H "kbn-xsrf: true" \
+            "${KB_URL}/api/agent_builder/agents/radiation-environment-expert")
+
+          if [ "$AGENT_STATUS" = "200" ]; then
+            curl -sf -X PUT \
+              "${KB_URL}/api/agent_builder/agents/radiation-environment-expert" \
+              -H "Authorization: ApiKey ${API_KEY}" \
+              -H "kbn-xsrf: true" \
+              -H "Content-Type: application/json" \
+              -d @agent/radiation-environment-expert.json
+            echo "✅ Agent updated"
+          else
+            curl -sf -X POST \
+              "${KB_URL}/api/agent_builder/agents" \
+              -H "Authorization: ApiKey ${API_KEY}" \
+              -H "kbn-xsrf: true" \
+              -H "Content-Type: application/json" \
+              -d @agent/radiation-environment-expert.json
+            echo "✅ Agent created"
+          fi
+
+      # ── 4. Elastic Workflow: Deploy ────────────────────
+      - name: Deploy Elastic Workflow
+        run: |
+          curl -sf -X PUT \
+            "${KB_URL}/api/workflow/radiation_daily_ingest" \
+            -H "Authorization: ApiKey ${API_KEY}" \
+            -H "kbn-xsrf: true" \
+            -H "Content-Type: application/yaml" \
+            --data-binary @workflows/radiation-daily-ingest.yml
+          echo "✅ Workflow deployed"
+
+      # ── 5. Elastic Workflow: Push Runtime Secrets ──────
+      - name: Configure Workflow Secrets
+        env:
+          ES_RUNTIME_KEY: ${{ secrets.ES_RUNTIME_API_KEY }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+        run: |
+          curl -sf -X PUT \
+            "${KB_URL}/api/workflow/radiation_daily_ingest/secrets" \
+            -H "Authorization: ApiKey ${API_KEY}" \
+            -H "kbn-xsrf: true" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "elasticsearch_api_key": "'"${ES_RUNTIME_KEY}"'",
+              "github_gist_token": "'"${GIST_TOKEN}"'"
+            }'
+          echo "✅ Workflow secrets configured"
+
+      # ── 6. Kibana: Deploy Dashboard ────────────────────
+      - name: Deploy Kibana Dashboard
+        run: |
+          curl -sf -X POST \
+            "${KB_URL}/api/saved_objects/_import?overwrite=true" \
+            -H "Authorization: ApiKey ${API_KEY}" \
+            -H "kbn-xsrf: true" \
+            -F file=@kibana/dashboard.ndjson
+          echo "✅ Dashboard deployed"

@@ -1,0 +1,296 @@
+name: radiation_daily_ingest
+description: >
+  Daily workflow: fetch Ukraine radiation data from three government JS sources,
+  parse and denormalize using Painless, bulk-index into Elasticsearch,
+  invoke AI agent for expert analysis, publish report to GitHub Gist.
+
+# ─── Triggers ──────────────────────────────────────────────────
+triggers:
+  - type: schedule
+    name: daily_15utc
+    rrule: >
+      DTSTART:20260226T150000Z
+      RRULE:FREQ=DAILY;INTERVAL=1;BYHOUR=15;BYMINUTE=0;BYSECOND=0
+  - type: on_demand
+    name: manual_trigger
+
+# ─── Secrets referenced by steps ───────────────────────────────
+secrets:
+  - elasticsearch_api_key
+  - github_gist_token
+
+# ─── Steps ─────────────────────────────────────────────────────
+steps:
+
+  # ── Step 1: Fetch radiation measurements ───────────────────
+  - name: fetch_radioday
+    type: http
+    with:
+      url: https://www.meteo.gov.ua/_/m/radioday.js
+      method: GET
+      headers:
+        Referer: "https://www.meteo.gov.ua/en/"
+        Accept: "*/*"
+
+  # ── Step 2: Fetch radiation station metadata ───────────────
+  - name: fetch_radio_posts
+    type: http
+    with:
+      url: https://www.meteo.gov.ua/en/_radio-posts.js
+      method: GET
+      headers:
+        Referer: "https://www.meteo.gov.ua/en/"
+        Accept: "*/*"
+
+  # ── Step 3: Fetch meteorological station metadata ──────────
+  - name: fetch_meteo_stations
+    type: http
+    with:
+      url: https://www.meteo.gov.ua/en/_meteo-stations.js
+      method: GET
+      headers:
+        Referer: "https://www.meteo.gov.ua/en/"
+        Accept: "*/*"
+
+  # ── Step 4: Parse JS, merge all sources, build NDJSON ──────
+  - name: transform_and_merge
+    type: painless
+    with:
+      source: |
+        // ── Helper: extract JSON object from "const VAR = {...};" ──
+        String extractJson(String js, String varName) {
+          int idx = js.indexOf('const ' + varName);
+          if (idx == -1) idx = js.indexOf('var ' + varName);
+          if (idx == -1) return '{}';
+          int braceStart = js.indexOf('{', idx);
+          if (braceStart == -1) return '{}';
+          int depth = 0;
+          int braceEnd = -1;
+          for (int i = braceStart; i < js.length(); i++) {
+            char c = js.charAt(i);
+            if (c == (char)'{') depth++;
+            if (c == (char)'}') depth--;
+            if (depth == 0) { braceEnd = i; break; }
+          }
+          if (braceEnd == -1) return '{}';
+          return js.substring(braceStart, braceEnd + 1);
+        }
+
+        // ── Parse the three JS responses ──────────────────────
+        String radiodayJs   = steps.fetch_radioday.output.body;
+        String radioPostsJs = steps.fetch_radio_posts.output.body;
+        String meteoJs      = steps.fetch_meteo_stations.output.body;
+
+        // Extract JSON from JS const declarations
+        String radiodayJsonStr = extractJson(radiodayJs, 'RADIO_DAY');
+        if (radiodayJsonStr.equals('{}')) {
+          int first = radiodayJs.indexOf('{');
+          int last  = radiodayJs.lastIndexOf('}');
+          if (first != -1 && last != -1) {
+            radiodayJsonStr = radiodayJs.substring(first, last + 1);
+          }
+        }
+        String radioPostsJsonStr = extractJson(radioPostsJs, 'RADIO_POSTS');
+        String meteoJsonStr      = extractJson(meteoJs, 'METEO_STATIONS');
+
+        // Parse into Maps
+        Map radioday   = new HashMap((Map) JSON.parse(radiodayJsonStr));
+        Map radioPosts = new HashMap((Map) JSON.parse(radioPostsJsonStr));
+        Map meteoRaw   = new HashMap((Map) JSON.parse(meteoJsonStr));
+
+        // ── Build station dictionary keyed by station_id ──────
+        Map stations = new HashMap();
+
+        // Radiation stations (object key IS the station ID)
+        for (Map.Entry entry : radioPosts.entrySet()) {
+          String sid = entry.getKey().toString();
+          Map post   = (Map) entry.getValue();
+          Map station = new HashMap();
+          station.put('station_id',            Integer.parseInt(sid));
+          station.put('station_name',          post.get('P').toString());
+          station.put('lat',                   Double.parseDouble(post.get('X').toString()));
+          station.put('lon',                   Double.parseDouble(post.get('Y').toString()));
+          station.put('altitude_m',            Integer.parseInt(post.get('H').toString()));
+          station.put('has_radiation_station',  true);
+          station.put('has_weather_station',    false);
+          stations.put(sid, station);
+        }
+
+        // Meteorological stations (join key is field "i", NOT outer key)
+        for (Map.Entry entry : meteoRaw.entrySet()) {
+          Map ms     = (Map) entry.getValue();
+          String sid = ms.get('i').toString();
+          if (stations.containsKey(sid)) {
+            Map existing = (Map) stations.get(sid);
+            existing.put('has_weather_station', true);
+          } else {
+            Map station = new HashMap();
+            station.put('station_id',            Integer.parseInt(sid));
+            station.put('station_name',          ms.get('t').toString());
+            station.put('lat',                   Double.parseDouble(ms.get('x').toString()));
+            station.put('lon',                   Double.parseDouble(ms.get('y').toString()));
+            station.put('altitude_m',            Integer.parseInt(ms.get('h').toString()));
+            station.put('has_radiation_station',  false);
+            station.put('has_weather_station',    true);
+            stations.put(sid, station);
+          }
+        }
+
+        // ── Determine common timestamp from radioday ──────────
+        String commonCD = '';
+        String commonCH = '';
+        for (Map.Entry entry : radioday.entrySet()) {
+          Map meas = (Map) entry.getValue();
+          commonCD = meas.get('CD').toString();
+          commonCH = meas.get('CH').toString();
+          break;
+        }
+
+        String[] dp = commonCD.split('\\.');
+        String day   = dp[0];
+        String month = dp[1];
+        String year  = dp[2];
+
+        int monthInt = Integer.parseInt(month);
+        int dayInt   = Integer.parseInt(day);
+        String tz = '+01:00';
+        if (monthInt >= 4 && monthInt <= 9) tz = '+02:00';
+        else if (monthInt == 3 && dayInt >= 25) tz = '+02:00';
+        else if (monthInt == 10 && dayInt < 25) tz = '+02:00';
+
+        String isoTimestamp = year + '-' + month + '-' + day + 'T' + commonCH + tz;
+        String isoDate      = year + '-' + month + '-' + day;
+
+        // ── Build NDJSON bulk body ────────────────────────────
+        StringBuilder bulk = new StringBuilder();
+        int totalStations = 0;
+        int missingCount  = 0;
+        int measuredCount = 0;
+
+        for (Map.Entry entry : stations.entrySet()) {
+          String sid  = entry.getKey().toString();
+          Map station = (Map) entry.getValue();
+          String docId = sid + '_' + isoDate;
+
+          Map indexMeta = new HashMap();
+          indexMeta.put('_index', 'radiation-dashboard');
+          indexMeta.put('_id', docId);
+          Map indexAction = new HashMap();
+          indexAction.put('index', indexMeta);
+          bulk.append(JSON.stringify(indexAction));
+          bulk.append('\n');
+
+          Map doc = new HashMap();
+          doc.put('@timestamp',            isoTimestamp);
+          doc.put('station_id',            station.get('station_id'));
+          doc.put('station_name',          station.get('station_name'));
+          Map location = new HashMap();
+          location.put('lat', station.get('lat'));
+          location.put('lon', station.get('lon'));
+          doc.put('location',              location);
+          doc.put('altitude_m',            station.get('altitude_m'));
+          doc.put('has_weather_station',   station.get('has_weather_station'));
+          doc.put('has_radiation_station', station.get('has_radiation_station'));
+
+          if (radioday.containsKey(sid)) {
+            Map meas = (Map) radioday.get(sid);
+            doc.put('radiation_urh',     meas.get('VR'));
+            doc.put('radiation_nsvh',    meas.get('VZ'));
+            doc.put('radiation_missing', false);
+            measuredCount++;
+          } else if ((boolean) station.get('has_radiation_station')) {
+            doc.put('radiation_urh',     null);
+            doc.put('radiation_nsvh',    null);
+            doc.put('radiation_missing', true);
+            missingCount++;
+          } else {
+            doc.put('radiation_urh',     null);
+            doc.put('radiation_nsvh',    null);
+            doc.put('radiation_missing', false);
+          }
+
+          bulk.append(JSON.stringify(doc));
+          bulk.append('\n');
+          totalStations++;
+        }
+
+        return [
+          'bulk_body':      bulk.toString(),
+          'station_count':  totalStations,
+          'measured_count': measuredCount,
+          'missing_count':  missingCount,
+          'timestamp':      isoTimestamp,
+          'iso_date':       isoDate
+        ];
+
+  # ── Step 5: Bulk index into Elasticsearch ──────────────────
+  - name: bulk_index
+    type: http
+    with:
+      url: https://tcless-c1c088.es.eu-west-2.aws.elastic.cloud/_bulk
+      method: POST
+      headers:
+        Content-Type: application/x-ndjson
+        Authorization: "ApiKey {{ secrets.elasticsearch_api_key }}"
+      body: "{{ steps.transform_and_merge.output.bulk_body }}"
+
+  # ── Step 6: Query summary statistics via ES|QL ─────────────
+  - name: query_summary_stats
+    type: esql
+    with:
+      query: >
+        FROM radiation-dashboard
+        | WHERE @timestamp == "{{ steps.transform_and_merge.output.timestamp }}"
+            AND radiation_missing == false
+        | STATS
+            min_urh        = MIN(radiation_urh),
+            max_urh        = MAX(radiation_urh),
+            avg_urh        = AVG(radiation_urh),
+            min_nsvh       = MIN(radiation_nsvh),
+            max_nsvh       = MAX(radiation_nsvh),
+            avg_nsvh       = AVG(radiation_nsvh),
+            station_count  = COUNT(*),
+            elevated_count = SUM(CASE(radiation_urh > 20, 1, 0)),
+            alarm_count    = SUM(CASE(radiation_urh > 30, 1, 0))
+
+  # ── Step 7: AI Agent — radiation expert analysis ───────────
+  - name: ai_radiation_analysis
+    type: ai.agent
+    with:
+      agent_id: radiation-environment-expert
+      message: >
+        Analyze today's radiation monitoring data for Ukraine.
+
+        Date: {{ steps.transform_and_merge.output.timestamp }}
+
+        Summary stats from ES|QL: {{ steps.query_summary_stats.output }}
+
+        Total stations: {{ steps.transform_and_merge.output.station_count }}
+        Stations with measurements: {{ steps.transform_and_merge.output.measured_count }}
+        Stations missing data: {{ steps.transform_and_merge.output.missing_count }}
+
+        Please query the radiation-dashboard index for the full dataset,
+        identify any elevated readings by station name, and produce your
+        complete Markdown radiation situation report.
+
+  # ── Step 8: Publish report to GitHub Gist ──────────────────
+  - name: publish_gist
+    type: http
+    with:
+      url: https://api.github.com/gists
+      method: POST
+      headers:
+        Accept: application/vnd.github+json
+        Authorization: "Bearer {{ secrets.github_gist_token }}"
+        X-GitHub-Api-Version: "2022-11-28"
+        Content-Type: application/json
+      body: |
+        {
+          "description": "Ukraine Radiation Report — {{ steps.transform_and_merge.output.iso_date }}",
+          "public": true,
+          "files": {
+            "radiation-report-{{ steps.transform_and_merge.output.iso_date }}.md": {
+              "content": {{ steps.ai_radiation_analysis.output | json_encode }}
+            }
+          }
+        }
