@@ -102,7 +102,11 @@ jobs:
        # ── 4. Elastic Workflow: Deploy ────────────────────
       - name: Deploy Elastic Workflow
         run: |
-          YAML_CONTENT=$(cat workflows/radiation-daily-ingest.yml)
+          # Build JSON payload from YAML file directly (avoids shell escaping issues)
+          jq -n --rawfile yaml workflows/radiation-daily-ingest.yml \
+            '{"yaml": $yaml}' > /tmp/workflow-payload.json
+
+          echo "Payload size: $(wc -c < /tmp/workflow-payload.json) bytes"
 
           # Check if workflow already exists by name
           EXISTING=$(curl -s \
@@ -110,8 +114,12 @@ jobs:
             -H "Authorization: ApiKey ${API_KEY}" \
             -H "kbn-xsrf: true")
 
-          WORKFLOW_ID=$(echo "$EXISTING" | jq -r \
-            '[.[] | select(.name == "radiation_daily_ingest")] | first | .id // empty' 2>/dev/null)
+          echo "Existing workflows: $(echo "$EXISTING" | head -c 300)"
+
+          WORKFLOW_ID=$(echo "$EXISTING" | jq -r '
+            if type == "array" then
+              [.[] | select(.name == "radiation_daily_ingest")] | first | .id // empty
+            else empty end' 2>/dev/null || true)
 
           if [ -n "$WORKFLOW_ID" ]; then
             echo "Updating existing workflow: ${WORKFLOW_ID}"
@@ -120,7 +128,7 @@ jobs:
               -H "Authorization: ApiKey ${API_KEY}" \
               -H "kbn-xsrf: true" \
               -H "Content-Type: application/json" \
-              -d "$(jq -n --arg yaml "$YAML_CONTENT" '{"yaml": $yaml}')")
+              -d @/tmp/workflow-payload.json)
           else
             echo "Creating new workflow"
             RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
@@ -128,7 +136,7 @@ jobs:
               -H "Authorization: ApiKey ${API_KEY}" \
               -H "kbn-xsrf: true" \
               -H "Content-Type: application/json" \
-              -d "$(jq -n --arg yaml "$YAML_CONTENT" '{"yaml": $yaml}')")
+              -d @/tmp/workflow-payload.json)
           fi
 
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
@@ -136,6 +144,9 @@ jobs:
           echo "HTTP ${HTTP_CODE}: ${BODY}"
           if [ "$HTTP_CODE" -ge 400 ]; then exit 1; fi
           echo "✅ Workflow deployed"
+
+          rm -f /tmp/workflow-payload.json
+
 
       # ── 5. Workflow Secrets ────────────────────────────
       - name: Configure Workflow Secrets
