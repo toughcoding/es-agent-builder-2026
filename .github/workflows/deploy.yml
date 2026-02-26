@@ -68,19 +68,22 @@ jobs:
       # ── 3. Agent Builder ───────────────────────────────
       - name: Deploy Radiation Environment Expert Agent
         run: |
+          AGENT_ID="radiation-environment-expert"
           AGENT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "Authorization: ApiKey ${API_KEY}" \
             -H "kbn-xsrf: true" \
-            "${KB_URL}/api/agent_builder/agents/radiation-environment-expert")
+            "${KB_URL}/api/agent_builder/agents/${AGENT_ID}")
           echo "Agent check: HTTP ${AGENT_STATUS}"
 
           if [ "$AGENT_STATUS" = "200" ]; then
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
-              "${KB_URL}/api/agent_builder/agents/radiation-environment-expert" \
-              -H "Authorization: ApiKey ${API_KEY}" \
-              -H "kbn-xsrf: true" \
-              -H "Content-Type: application/json" \
-              -d @agent/radiation-environment-expert.json)
+            echo "⏭️  Agent already exists, updating..."
+            RESPONSE=$(jq 'del(.id)' agent/radiation-environment-expert.json \
+              | curl -s -w "\n%{http_code}" -X PUT \
+                "${KB_URL}/api/agent_builder/agents/${AGENT_ID}" \
+                -H "Authorization: ApiKey ${API_KEY}" \
+                -H "kbn-xsrf: true" \
+                -H "Content-Type: application/json" \
+                -d @-)
           else
             RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
               "${KB_URL}/api/agent_builder/agents" \
