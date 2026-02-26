@@ -1,4 +1,5 @@
 name: radiation_daily_ingest
+enabled: true
 description: >
   Daily workflow: fetch Ukraine radiation data from three government JS sources,
   parse and denormalize using Painless, bulk-index into Elasticsearch,
@@ -7,17 +8,10 @@ description: >
 # ─── Triggers ──────────────────────────────────────────────────
 triggers:
   - type: schedule
-    name: daily_15utc
     rrule: >
       DTSTART:20260226T150000Z
       RRULE:FREQ=DAILY;INTERVAL=1;BYHOUR=15;BYMINUTE=0;BYSECOND=0
-  - type: on_demand
-    name: manual_trigger
-
-# ─── Secrets referenced by steps ───────────────────────────────
-secrets:
-  - elasticsearch_api_key
-  - github_gist_token
+  - type: manual
 
 # ─── Steps ─────────────────────────────────────────────────────
 steps:
@@ -234,26 +228,7 @@ steps:
         Authorization: "ApiKey {{ secrets.elasticsearch_api_key }}"
       body: "{{ steps.transform_and_merge.output.bulk_body }}"
 
-  # ── Step 6: Query summary statistics via ES|QL ─────────────
-  - name: query_summary_stats
-    type: esql
-    with:
-      query: >
-        FROM radiation-dashboard
-        | WHERE @timestamp == "{{ steps.transform_and_merge.output.timestamp }}"
-            AND radiation_missing == false
-        | STATS
-            min_urh        = MIN(radiation_urh),
-            max_urh        = MAX(radiation_urh),
-            avg_urh        = AVG(radiation_urh),
-            min_nsvh       = MIN(radiation_nsvh),
-            max_nsvh       = MAX(radiation_nsvh),
-            avg_nsvh       = AVG(radiation_nsvh),
-            station_count  = COUNT(*),
-            elevated_count = SUM(CASE(radiation_urh > 20, 1, 0)),
-            alarm_count    = SUM(CASE(radiation_urh > 30, 1, 0))
-
-  # ── Step 7: AI Agent — radiation expert analysis ───────────
+  # ── Step 6: AI Agent — radiation expert analysis ───────────
   - name: ai_radiation_analysis
     type: ai.agent
     with:
@@ -263,8 +238,6 @@ steps:
 
         Date: {{ steps.transform_and_merge.output.timestamp }}
 
-        Summary stats from ES|QL: {{ steps.query_summary_stats.output }}
-
         Total stations: {{ steps.transform_and_merge.output.station_count }}
         Stations with measurements: {{ steps.transform_and_merge.output.measured_count }}
         Stations missing data: {{ steps.transform_and_merge.output.missing_count }}
@@ -273,7 +246,7 @@ steps:
         identify any elevated readings by station name, and produce your
         complete Markdown radiation situation report.
 
-  # ── Step 8: Publish report to GitHub Gist ──────────────────
+  # ── Step 7: Publish report to GitHub Gist ──────────────────
   - name: publish_gist
     type: http
     with:

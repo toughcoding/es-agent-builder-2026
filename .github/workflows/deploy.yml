@@ -99,15 +99,37 @@ jobs:
           if [ "$HTTP_CODE" -ge 400 ]; then exit 1; fi
           echo "✅ Agent deployed"
 
-      # ── 4. Elastic Workflow ────────────────────────────
+       # ── 4. Elastic Workflow: Deploy ────────────────────
       - name: Deploy Elastic Workflow
         run: |
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
-            "${KB_URL}/api/workflow/radiation_daily_ingest" \
+          YAML_CONTENT=$(cat workflows/radiation-daily-ingest.yml)
+
+          # Check if workflow already exists by name
+          EXISTING=$(curl -s \
+            "${KB_URL}/api/workflows" \
             -H "Authorization: ApiKey ${API_KEY}" \
-            -H "kbn-xsrf: true" \
-            -H "Content-Type: application/yaml" \
-            --data-binary @workflows/radiation-daily-ingest.yml)
+            -H "kbn-xsrf: true")
+
+          WORKFLOW_ID=$(echo "$EXISTING" | jq -r \
+            '[.[] | select(.name == "radiation_daily_ingest")] | first | .id // empty' 2>/dev/null)
+
+          if [ -n "$WORKFLOW_ID" ]; then
+            echo "Updating existing workflow: ${WORKFLOW_ID}"
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+              "${KB_URL}/api/workflows/${WORKFLOW_ID}" \
+              -H "Authorization: ApiKey ${API_KEY}" \
+              -H "kbn-xsrf: true" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg yaml "$YAML_CONTENT" '{"yaml": $yaml}')")
+          else
+            echo "Creating new workflow"
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              "${KB_URL}/api/workflows" \
+              -H "Authorization: ApiKey ${API_KEY}" \
+              -H "kbn-xsrf: true" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg yaml "$YAML_CONTENT" '{"yaml": $yaml}')")
+          fi
 
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | sed '$d')
