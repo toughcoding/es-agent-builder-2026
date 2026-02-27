@@ -65,31 +65,24 @@ jobs:
           YAML_WITH_SECRET=$(sed "s|github_gist_token_placeholder|${GIST_TOKEN}|g" \
             workflows/radiation-daily-ingest.yml)
 
-          # Build JSON payload with all required fields
-          jq -n \
-            --arg yaml "$YAML_WITH_SECRET" \
-            --arg name "radiation_daily_ingest" \
-            --arg desc "Daily workflow: fetch Ukraine radiation data, AI parse/merge/index, analyze, publish to Gist" \
-            '{
-              name: $name,
-              description: $desc,
-              enabled: true,
-              yaml: $yaml,
-              definition: {}
-            }' > /tmp/workflow-payload.json
+          # Build JSON payload — API expects just {"yaml": "..."}
+          echo "$YAML_WITH_SECRET" | jq -Rs '{"yaml": .}' > /tmp/workflow-payload.json
 
           echo "Payload size: $(wc -c < /tmp/workflow-payload.json) bytes"
 
-          # Check if workflow already exists by name
-          EXISTING=$(curl -s \
-            "${KB_URL}/api/workflows" \
+          # Search for existing workflow using POST /api/workflows/search
+          SEARCH_RESULT=$(curl -s -X POST \
+            "${KB_URL}/api/workflows/search" \
             -H "Authorization: ApiKey ${API_KEY}" \
-            -H "kbn-xsrf: true")
+            -H "kbn-xsrf: true" \
+            -H "Content-Type: application/json" \
+            -d '{"page": 1, "limit": 100}')
 
-          WORKFLOW_ID=$(echo "$EXISTING" | jq -r '
-            if type == "array" then
-              [.[] | select(.name == "radiation_daily_ingest")] | first | .id // empty
-            else empty end' 2>/dev/null || true)
+          echo "Search result: $(echo "$SEARCH_RESULT" | jq -r '.results | length') workflows found"
+
+          WORKFLOW_ID=$(echo "$SEARCH_RESULT" | jq -r '
+            [.results[] | select(.name == "radiation_daily_ingest")] | first | .id // empty' \
+            2>/dev/null || true)
 
           if [ -n "$WORKFLOW_ID" ]; then
             echo "Updating existing workflow: ${WORKFLOW_ID}"
@@ -100,7 +93,7 @@ jobs:
               -H "Content-Type: application/json" \
               -d @/tmp/workflow-payload.json)
           else
-            echo "Creating new workflow"
+            echo "No existing workflow found. Trying POST create..."
             RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
               "${KB_URL}/api/workflows" \
               -H "Authorization: ApiKey ${API_KEY}" \
