@@ -11,15 +11,15 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        GITHUB REPOSITORY                        │
-│  Source of truth — deployed to Elastic Cloud via GitHub Actions  │
+│  Source of truth — deployed to Elastic Cloud via GitHub Actions │
 └──────────────┬──────────────────────────────────────────────────┘
                │ deploys via Kibana APIs (zero manual steps)
                ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    ELASTIC CLOUD (Serverless)                    │
+│                    ELASTIC CLOUD (Serverless)                   │
 │                                                                 │
 │  ┌─────────────────────────────────────────────────────────┐    │
-│  │     ELASTIC WORKFLOW  (scheduled daily + on-demand)      │    │
+│  │     ELASTIC WORKFLOW  (scheduled daily + on-demand)     │    │
 │  │                                                         │    │
 │  │  1. Check/create index (elasticsearch.indices)          │    │
 │  │  2. Fetch radioday.js          (http)                   │    │
@@ -31,10 +31,10 @@
 │  │  8. Publish report to Gist     (http → GitHub API)      │    │
 │  └─────────────────────────────────────────────────────────┘    │
 │                                                                 │
-│  ┌──────────────────┐  ┌──────────────────────────────────┐    │
-│  │ radiation-dashboard│  │  Kibana Dashboard (Map + Panels) │    │
+│  ┌───────────────────┐  ┌──────────────────────────────────┐    │
+│  │radiation-dashboard│  │  Kibana Dashboard (Map + Panels) │    │
 │  │ (ES index)        │  │                                  │    │
-│  └──────────────────┘  └──────────────────────────────────┘    │
+│  └───────────────────┘  └──────────────────────────────────┘    │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Agent Builder: "Radiation Environment Expert"           │   │
