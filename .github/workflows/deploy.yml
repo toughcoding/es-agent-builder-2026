@@ -58,7 +58,7 @@ jobs:
       # ── 2. Elastic Workflow: Deploy ────────────────────
       - name: Deploy Elastic Workflow
         env:
-          GIST_TOKEN: ${{ secrets.GITHUB_GIST_TOKEN }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
         run: |
           # Read YAML and inject the Gist token
           YAML_WITH_SECRET=$(sed "s|github_gist_token_placeholder|${GIST_TOKEN}|g" \
