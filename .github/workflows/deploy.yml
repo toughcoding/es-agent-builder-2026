@@ -65,8 +65,17 @@ jobs:
           YAML_WITH_SECRET=$(sed "s|github_gist_token_placeholder|${GIST_TOKEN}|g" \
             workflows/radiation-daily-ingest.yml)
 
-          # Build JSON payload
-          echo "$YAML_WITH_SECRET" | jq -Rs '{"yaml": .}' > /tmp/workflow-payload.json
+          # Build JSON payload with all required fields
+          jq -n \
+            --arg yaml "$YAML_WITH_SECRET" \
+            --arg name "radiation_daily_ingest" \
+            --arg desc "Daily workflow: fetch Ukraine radiation data, AI parse/merge/index, analyze, publish to Gist" \
+            '{
+              name: $name,
+              description: $desc,
+              enabled: true,
+              yaml: $yaml
+            }' > /tmp/workflow-payload.json
 
           echo "Payload size: $(wc -c < /tmp/workflow-payload.json) bytes"
 
