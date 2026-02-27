@@ -228,7 +228,7 @@ steps:
          "public": true,
          "files": {
            "radiation-report.md": {
-             "content": {{ steps.ai_analyze.output | json }}
+             "content": {{ steps.ai_analyze.output.message | json }}
            }
          }
        }
