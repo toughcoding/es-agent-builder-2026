@@ -74,7 +74,8 @@ jobs:
               name: $name,
               description: $desc,
               enabled: true,
-              yaml: $yaml
+              yaml: $yaml,
+              definition: {}
             }' > /tmp/workflow-payload.json
 
           echo "Payload size: $(wc -c < /tmp/workflow-payload.json) bytes"
