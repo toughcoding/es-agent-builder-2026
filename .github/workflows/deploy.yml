@@ -22,50 +22,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 1. Index Template ──────────────────────────────
-      - name: Deploy Index Template
-        run: |
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
-            "${ES_URL}/_index_template/radiation-dashboard-template" \
-            -H "Authorization: ApiKey ${API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d @elasticsearch/index-template.json)
-
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-
-          echo "HTTP ${HTTP_CODE}: ${BODY}"
-          if [ "$HTTP_CODE" -ge 400 ]; then
-            echo "❌ Failed to deploy index template"
-            exit 1
-          fi
-          echo "✅ Index template deployed"
-
-      # ── 2. Bootstrap Write Index ───────────────────────
-      - name: Bootstrap Write Index (idempotent)
-        run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: ApiKey ${API_KEY}" \
-            "${ES_URL}/radiation-dashboard")
-          echo "Alias check: HTTP ${STATUS}"
-
-          if [ "$STATUS" = "404" ]; then
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
-              "${ES_URL}/radiation-dashboard-000001" \
-              -H "Authorization: ApiKey ${API_KEY}" \
-              -H "Content-Type: application/json" \
-              -d @elasticsearch/bootstrap-index.json)
-
-            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-            BODY=$(echo "$RESPONSE" | sed '$d')
-            echo "HTTP ${HTTP_CODE}: ${BODY}"
-            if [ "$HTTP_CODE" -ge 400 ]; then exit 1; fi
-            echo "✅ Bootstrap index created"
-          else
-            echo "⏭️  Alias already exists, skipping"
-          fi
-
-      # ── 3. Agent Builder ───────────────────────────────
+      # ── 1. Agent Builder ───────────────────────────────
       - name: Deploy Radiation Environment Expert Agent
         run: |
           AGENT_ID="radiation-environment-expert"
@@ -99,12 +56,17 @@ jobs:
           if [ "$HTTP_CODE" -ge 400 ]; then exit 1; fi
           echo "✅ Agent deployed"
 
-       # ── 4. Elastic Workflow: Deploy ────────────────────
+      # ── 2. Elastic Workflow: Deploy ────────────────────
       - name: Deploy Elastic Workflow
+        env:
+          GIST_TOKEN: ${{ secrets.GITHUB_GIST_TOKEN }}
         run: |
-          # Build JSON payload from YAML file directly (avoids shell escaping issues)
-          jq -n --rawfile yaml workflows/radiation-daily-ingest.yml \
-            '{"yaml": $yaml}' > /tmp/workflow-payload.json
+          # Read YAML and inject the Gist token
+          YAML_WITH_SECRET=$(sed "s|github_gist_token_placeholder|${GIST_TOKEN}|g" \
+            workflows/radiation-daily-ingest.yml)
+
+          # Build JSON payload
+          echo "$YAML_WITH_SECRET" | jq -Rs '{"yaml": .}' > /tmp/workflow-payload.json
 
           echo "Payload size: $(wc -c < /tmp/workflow-payload.json) bytes"
 
@@ -113,8 +75,6 @@ jobs:
             "${KB_URL}/api/workflows" \
             -H "Authorization: ApiKey ${API_KEY}" \
             -H "kbn-xsrf: true")
-
-          echo "Existing workflows: $(echo "$EXISTING" | head -c 300)"
 
           WORKFLOW_ID=$(echo "$EXISTING" | jq -r '
             if type == "array" then
@@ -147,30 +107,7 @@ jobs:
 
           rm -f /tmp/workflow-payload.json
 
-
-      # ── 5. Workflow Secrets ────────────────────────────
-      - name: Configure Workflow Secrets
-        env:
-          ES_RUNTIME_KEY: ${{ secrets.ES_RUNTIME_API_KEY }}
-          GIST_TOKEN: ${{ secrets.GITHUB_GIST_TOKEN }}
-        run: |
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
-            "${KB_URL}/api/workflow/radiation_daily_ingest/secrets" \
-            -H "Authorization: ApiKey ${API_KEY}" \
-            -H "kbn-xsrf: true" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "elasticsearch_api_key": "'"${ES_RUNTIME_KEY}"'",
-              "github_gist_token": "'"${GIST_TOKEN}"'"
-            }')
-
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          echo "HTTP ${HTTP_CODE}: ${BODY}"
-          if [ "$HTTP_CODE" -ge 400 ]; then exit 1; fi
-          echo "✅ Workflow secrets configured"
-
-      # ── 6. Kibana Dashboard ────────────────────────────
+      # ── 3. Kibana Dashboard ────────────────────────────
       - name: Deploy Kibana Dashboard
         run: |
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
